@@ -200,7 +200,7 @@ private :
 
 		send< resize_request >( resizer_mbox_, so_direct_mbox(),
 				image_handle{ ss.str(), last_cx_, last_cy_, string() },
-				0.5 );
+				0.5f );
 		send_delayed< next >( *this, last_pause_ );
 
 		update_last_pause();

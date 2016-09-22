@@ -18,4 +18,6 @@ MxxRu::Cpp::composite_target( MxxRu::BUILD_ROOT ) {
     MxxRu::enable_show_brief
     global_obj_placement MxxRu::Cpp::RuntimeSubdirObjPlacement.new( 'target' )
   end
+
+  required_prj 'msg_limit/prj.rb'
 }
