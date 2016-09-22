@@ -203,7 +203,7 @@ private :
 				0.5 );
 		send_delayed< next >( *this, last_pause_ );
 
-		last_pause_ -= last_pause_ / 50;
+		update_last_pause();
 		last_cx_ = last_cx_ + last_cx_ / 4;
 		last_cy_ = last_cy_ + last_cy_ / 4;
 
@@ -215,6 +215,12 @@ private :
 		cout << "resize_result: " << msg.image_.name_
 				<< " (" << msg.image_.cx_ << "," << msg.image_.cy_ << ") ["
 				<< msg.image_.comment_ << "]" << std::endl;
+	}
+
+	void update_last_pause() {
+		static constexpr chrono::milliseconds minimal{ 20 };
+		if( last_pause_ > minimal )
+			last_pause_ -= chrono::milliseconds{ 1 };
 	}
 };
 
