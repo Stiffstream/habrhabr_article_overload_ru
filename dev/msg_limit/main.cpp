@@ -18,6 +18,12 @@ auto to_ui( T v ) {
 	return static_cast< unsigned int >(v);
 }
 
+// Вспомогательная функция для вычисления паузы для притормаживания
+// рабочей нити.
+auto sleeping_pause( unsigned long long v ) {
+	return chrono::microseconds( v / 50 );
+}
+
 // Вместо реальных картинок используем данный тип для имитации.
 struct image_handle {
 	string name_; // Какое-то название.
@@ -53,9 +59,9 @@ struct resize_result : public message_t {
 };
 
 // Тип агента, который выполняет нормальную обработку картинок.
-class normal_resizer final : public agent_t {
+class accurate_resizer final : public agent_t {
 public :
-	normal_resizer( context_t ctx, mbox_t overload_mbox )
+	accurate_resizer( context_t ctx, mbox_t overload_mbox )
 		// Лимиты настраиваются при создании агента и не могут меняться
 		// впоследствии. Поэтому конструируем лимиты сообщений как уточнение
 		// контекста, в котором агенту предстоит работать дальше.
@@ -74,7 +80,7 @@ public :
 				// Приостанавливаем выполнение текущей нити на время,
 				// пропорциональное размеру картинки.
 				const auto px_count = to_ull( msg.image_.cx_ ) * msg.image_.cy_;
-				this_thread::sleep_for( chrono::nanoseconds{px_count} );
+				this_thread::sleep_for( sleeping_pause( px_count ) );
 				// Имитируем нормальный ответ.
 				send< resize_result >( msg.reply_to_, image_handle{
 						msg.image_.name_,
@@ -99,7 +105,7 @@ public :
 		// Простая имитация обработки изобращения.
 		so_subscribe_self().event( []( const resize_request & msg ) {
 				const auto px_count = to_ull( msg.image_.cx_ ) * msg.image_.cy_;
-				this_thread::sleep_for( chrono::nanoseconds{px_count / 3} );
+				this_thread::sleep_for( sleeping_pause( px_count / 3 ) );
 				send< resize_result >( msg.reply_to_, image_handle{
 						msg.image_.name_,
 						to_ui( msg.image_.cx_ * msg.scale_factor_ ),
@@ -125,7 +131,7 @@ public :
 				const auto cx = to_ui( msg.image_.cx_ * msg.scale_factor_ );
 				const auto cy = to_ui( msg.image_.cy_ * msg.scale_factor_ );
 				const auto px_count = to_ull( cx ) * cy;
-				this_thread::sleep_for( chrono::nanoseconds{px_count / 2} );
+				this_thread::sleep_for( sleeping_pause( px_count / 2 ) );
 				send< resize_result >( msg.reply_to_, image_handle{
 						msg.image_.name_,
 						cx,
@@ -135,6 +141,99 @@ public :
 	}
 };
 
+// Вспомогательная функция для создания агентов для рейсайзинга картинок.
+// Возвращается mbox, на который следует отсылать запросы для ресайзинга.
+mbox_t make_resizers( environment_t & env ) {
+	mbox_t resizer_mbox;
+	// Все агенты будут иметь собственный контекст исполнения (т.е. каждый агент
+	// будет активным объектом), для чего используется приватный диспетчер
+	// active_obj.
+	env.introduce_coop(
+		disp::active_obj::create_private_disp( env )->binder(),
+		[&resizer_mbox]( coop_t & coop ) {
+			// Создаем агентов в обратном порядке, т.к. нам нужны будут
+			// mbox-ы на которые следует перенаправлять "лишние" сообщения.
+			auto third = coop.make_agent< empty_image_maker >();
+			auto second = coop.make_agent< inaccurate_resizer >( third->so_direct_mbox() );
+			auto first = coop.make_agent< accurate_resizer >( second->so_direct_mbox() );
+
+			// Последним создан агент, который будет первым в цепочке агентов
+			// для ресайзинга картинок. Его почтовый ящик и будет ящиком для
+			// отправки запросов.
+			resizer_mbox = first->so_direct_mbox();
+		} );
+
+	return resizer_mbox;
+}
+
+// Агент, который будет генерировать запросы на ресайзинг картинок
+// и обрабатывать результаты ресайзинга.
+class requests_initiator final : public agent_t {
+	struct next : public signal_t {};
+public :
+	requests_initiator( context_t ctx, mbox_t resizer_mbox )
+		:	agent_t(ctx), resizer_mbox_(move(resizer_mbox))
+	{
+		so_subscribe_self()
+			.event( &requests_initiator::on_next )
+			.event( &requests_initiator::on_result );
+	}
+
+	virtual void so_evt_start() override {
+		send< next >( *this );
+	}
+
+private :
+	const mbox_t resizer_mbox_;
+
+	chrono::milliseconds last_pause_{ 250 };
+
+	static constexpr unsigned int initial_size = 1024;
+	static constexpr unsigned int maximin_size = initial_size * 8;
+
+	unsigned int last_cx_{ initial_size };
+	unsigned int last_cy_{ initial_size };
+
+	void on_next( mhood_t< next > ) {
+		ostringstream ss;
+		ss << "img_" << last_cx_ << "x" << last_cy_ << "-" << last_pause_.count();
+
+		send< resize_request >( resizer_mbox_, so_direct_mbox(),
+				image_handle{ ss.str(), last_cx_, last_cy_, string() },
+				0.5 );
+		send_delayed< next >( *this, last_pause_ );
+
+		last_pause_ -= last_pause_ / 50;
+		last_cx_ = last_cx_ + last_cx_ / 4;
+		last_cy_ = last_cy_ + last_cy_ / 4;
+
+		if( last_cx_ > maximin_size ) last_cx_ = initial_size;
+		if( last_cy_ > maximin_size ) last_cy_ = initial_size;
+	}
+
+	void on_result( const resize_result & msg ) {
+		cout << "resize_result: " << msg.image_.name_
+				<< " (" << msg.image_.cx_ << "," << msg.image_.cy_ << ") ["
+				<< msg.image_.comment_ << "]" << std::endl;
+	}
+};
+
 int main() {
+	try {
+		so_5::launch( []( environment_t & env ) {
+			// Создаем кооперацию с агентами для ресайзинга.
+			const auto resize_mbox = make_resizers( env );
+
+			// Создаем агента, который будет генерировать запросы на ресайзинг.
+			env.register_agent_as_coop( autoname,
+				env.make_agent< requests_initiator >( resize_mbox ) );
+
+			// Далее приложение будет работать до тех пор, пока не прервется
+			// аварийно из-за превышения лимитов.
+		} );
+	}
+	catch( const exception & x ) {
+		cerr << "Exception: " << x.what() << endl;
+	}
 }
 
